@@ -1,56 +1,146 @@
 ## iQuHack 2026 — Entanglement Distillation Game (IonQ)
 
-This repo contains our **hackathon toolkit** for the entanglement distillation game: a small Python SDK, a notebook “control center”, and visual + automated strategy helpers.
+Our hackathon project: a **circuit toolkit + strategy layer + visual clients** for the entanglement distillation game.
 
-### Our approach (what we built + why)
+- **Circuit focus**: reusable OpenQASM 3 / Qiskit templates with explicit `flag_bit` post-selection.
+- **Score focus**: maximize the game’s effective edge contribution \(F \cdot p\) while clearing thresholds.
+- **Strategy focus**: expand toward high-value nodes (utility + bonus) and manage failure streaks.
+- **Workflow focus**: iterate quickly via notebook + interactive/auto visualizers + web UI.
 
-- **Circuit toolkit first**: we implemented and iterated on practical OpenQASM 3 / Qiskit distillation circuits (with explicit `flag_bit` post-selection) so we can reliably convert “\(N\) noisy pairs” → “one higher-fidelity pair” per edge type. See `distillation_circuits.py`.
-- **Optimize what the game rewards**: edge contribution is driven by **fidelity × success_probability**, so we target circuits/parameters that maximize \(F \cdot p\) while still meeting the edge’s threshold.
-- **Expansion strategy**: we prioritize reachable, high-value nodes (utility qubits + bonus bell pairs) while managing difficulty and failure streaks. See `greedy_auto_viz.py`.
-- **Fast feedback loops**: we built UIs to reduce iteration time—manual interactive play, and an auto-running greedy visualizer. See `interactive_viz.py` and `web_client.html`.
+### Table of contents
+
+- [Screenshots](#screenshots)
+- [Quickstart](#quickstart)
+- [Website](#website)
+- [Game (web)](#game-web)
+- [How we play](#how-we-play)
+- [Project structure](#project-structure)
+- [Configuration](#configuration)
+
+### Screenshots
+
+Put images in **`assets/screenshots/`** (relative to this `README.md`) and reference them with relative paths so GitHub renders them.
+
+Example (replace filenames with your real ones):
+
+```md
+![Web client overview](assets/screenshots/web-client.png)
+![Interactive viz edge attack](assets/screenshots/interactive-viz.png)
+![Greedy auto viz run](assets/screenshots/greedy-auto-viz.png)
+```
+
+Recommended filenames:
+
+- `assets/screenshots/web-client.png`
+- `assets/screenshots/interactive-viz.png`
+- `assets/screenshots/greedy-auto-viz.png`
+- `assets/screenshots/notebook-demo.png`
+- `assets/screenshots/website.png`
 
 ### Quickstart
 
-#### Python (recommended: notebook workflow)
+#### Install (Windows PowerShell)
 
-```bash
+```powershell
 cd 2026-IonQ
 python -m venv .venv
-.\.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-Open `demo.ipynb` (VS Code or Jupyter). It includes **session save/load** via `session.json` so you don’t have to re-register every time.
-
-#### Browser UI (quick manual play + map)
+#### Install (macOS/Linux)
 
 ```bash
 cd 2026-IonQ
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+#### Notebook workflow (recommended)
+
+Open `demo.ipynb` (VS Code or Jupyter). It includes **session save/load** via `session.json` so you don’t have to re-register every time.
+
+### Website
+
+The hackathon website lives in `ionqwebsite/`:
+
+- **Entry point**: `ionqwebsite/index.html` (redirects to `iQuhackweb.html`)
+- **Main page**: `ionqwebsite/iQuhackweb.html`
+
+To view locally (recommended: use the same dev server as the game so relative assets work):
+
+```bash
+cd 2026-IonQ/ionqwebsite
+python proxy_server.py
+```
+
+Then open `http://localhost:5173/iQuhackweb.html` (or just `http://localhost:5173/`).
+
+### Game (web)
+
+The playable web client lives in `ionqwebsite/web_client.html`.
+
+Start the local proxy server (CORS + static):
+
+```bash
+cd 2026-IonQ/ionqwebsite
 python proxy_server.py
 ```
 
 Then open `http://localhost:5173/web_client.html`.
 
-### Repository structure (what to open first)
+#### Python visualizers
+
+```bash
+cd 2026-IonQ
+python "interactive game/interactive_viz.py"
+```
+
+```bash
+cd 2026-IonQ
+python "interactive game/greedy_auto_viz.py"
+```
+
+### How we play
+
+- **Start**: pick a starting node balancing immediate utility vs bonus bell-pairs.
+- **Attack selection**: prefer edges that lead to high-value targets; deprioritize D4/D5 unless we’re stuck.
+- **Circuit selection**: use templates from `distillation_circuits.py`; tune \(N\) and post-selection so \(F \cdot p\) stays strong and clears the threshold.
+- **Iterate fast**: use `interactive_viz.py` / `web_client.html` to reduce “guess → run → see result” time.
+
+### Project structure
 
 ```text
 2026-IonQ/
-  demo.ipynb              Notebook “home base” (register, play, iterate)
-  client.py               GameClient (API wrapper + claim helpers)
-  distillation_circuits.py Circuit library / templates
-  visualization.py        Static graph utilities (NetworkX/Matplotlib)
-  interactive_viz.py       Interactive map + “click edge, attack” workflow
-  greedy_auto_viz.py       Auto-running greedy strategy visualizer
-  web_client.html          Standalone web client UI (uses a proxy for CORS)
-  proxy_server.py          Local static server + CORS proxy for web_client.html
-  api/proxy.js             Vercel-style serverless proxy (optional deployment)
-  game_handbook.md         Game rules (LOCC constraints, scoring, etc.)
-  requirements.txt         Python dependencies
-  session.json             Local saved token/session (do not commit)
+  demo.ipynb                 Notebook “home base” (register, play, iterate)
+  client.py                  GameClient (API wrapper + claim helpers)
+  distillation_circuits.py    Circuit library / templates
+
+  visualization.py           Static graph utilities (NetworkX/Matplotlib)
+  interactive game/           Python gameplay tools
+    interactive_viz.py        Interactive map + “click edge, attack” workflow
+    greedy_auto_viz.py        Auto-running greedy strategy visualizer
+
+  ionqwebsite/                Website + web client bundle
+    index.html                Redirect entrypoint
+    iQuhackweb.html           Website / submission page
+    site.html                 Static page (alt landing)
+    web_client.html           Web game client UI
+    proxy_server.py           Local static server + CORS proxy for web client
+    api/proxy.js              Vercel-style serverless proxy (optional deployment)
+
+  animations/                 Animation experiments + network notebooks
+  graph_search_algorithms/    Strategy/bot experiments and variants
+
+  game_handbook.md            Game rules (LOCC constraints, scoring, etc.)
+  requirements.txt            Python dependencies
+  session.json                Local saved token/session (do not commit)
+  assets/                     Place screenshots for GitHub README
 ```
 
-### Configuration notes
+### Configuration
 
 - **Upstream server**: defaults to `https://demo-entanglement-distillation-qfhvrahfcq-uc.a.run.app`.
-  - Python: pass `base_url=...` to `GameClient(...)`.
-  - Web/proxy: set `UPSTREAM_BASE_URL` if you need to point elsewhere.
+  - **Python**: pass `base_url=...` to `GameClient(...)`.
+  - **Web/proxy**: set `UPSTREAM_BASE_URL` if you need to point elsewhere.

@@ -1,11 +1,4 @@
 # %% [markdown]
-#
-# 66 points in initial test
-#
-# The BARCS (Budget Aware ROI Cluster Scout) Algorithm will seek out clusters of high-value nodes and
-# prioritize paths to them based on ROI and budget considerations. This should help maximize point gain and 
-# strategic positioning in the network.
-#
 # # iQuHack 2026 - Quantum Entanglement Distillation Game
 # 
 # In this game, you design quantum circuits to distill noisy Bell pairs and claim edges in a network.
@@ -252,7 +245,7 @@ if not my_start:
         raise ValueError("Critical: No owned nodes or starting node found. Check registration.")
 
 # 3. RUN ANALYSIS
-targets = analyze_quantum_targets_with_clusters(G, my_start,1)
+targets = analyze_quantum_targets(G, my_start)
 
 print(f"--- STRATEGIC TARGETS FROM {my_start} ---")
 for t in targets[:10]:
