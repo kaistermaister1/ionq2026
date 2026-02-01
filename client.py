@@ -2,7 +2,7 @@
 GameClient - Player interface for the quantum networking game server.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 from qiskit import QuantumCircuit, qasm3
 
@@ -16,6 +16,10 @@ class GameClient:
         self.player_id: Optional[str] = None
         self.name: Optional[str] = None
         self._cached_graph: Optional[Dict[str, Any]] = None
+        # Optimistic local connectivity: if a claim succeeds but the next /status
+        # response lags briefly, we still treat the edge as owned immediately.
+        # Stored as canonical undirected edges (a,b) with a<=b.
+        self._optimistic_owned_edges: Set[Tuple[str, str]] = set()
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -24,16 +28,50 @@ class GameClient:
         return headers
 
     def _get(self, path: str) -> Dict[str, Any]:
-        r = requests.get(f"{self.base_url}{path}", headers=self._headers(), timeout=120)
-        r.raise_for_status()
-        return r.json().get("data", {})
+        try:
+            r = requests.get(f"{self.base_url}{path}", headers=self._headers(), timeout=120)
+        except requests.RequestException as e:
+            # Keep callers resilient; surface minimal info.
+            return {"_error": {"code": "NETWORK_ERROR", "message": str(e)}}
+
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {}
+
+        if not r.ok:
+            # Most endpoints return {"ok": false, "error": {...}} even on 4xx.
+            err = payload.get("error") or {"code": f"HTTP_{r.status_code}", "message": (r.text or "").strip()[:500]}
+            return {"_error": err}
+
+        # Successful GET endpoints are usually {"data": {...}}
+        return payload.get("data", {}) or {}
 
     def _post(self, path: str, payload: Dict[str, Any], require_auth: bool = True) -> Dict[str, Any]:
         if require_auth and not self.api_token:
             return {"ok": False, "error": {"code": "NO_TOKEN", "message": "No API token. Register first."}}
-        r = requests.post(f"{self.base_url}{path}", json=payload, headers=self._headers(), timeout=30)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = requests.post(f"{self.base_url}{path}", json=payload, headers=self._headers(), timeout=30)
+        except requests.RequestException as e:
+            return {"ok": False, "error": {"code": "NETWORK_ERROR", "message": str(e)}}
+
+        try:
+            resp = r.json()
+        except Exception:
+            resp = {}
+
+        # For 4xx/5xx, return JSON error instead of raising, so callers can print
+        # the actual server error code/message (avoids "random 400" mystery).
+        if not r.ok:
+            if isinstance(resp, dict) and "ok" in resp:
+                return resp
+            return {
+                "ok": False,
+                "error": resp.get("error") if isinstance(resp, dict) else None
+                or {"code": f"HTTP_{r.status_code}", "message": (r.text or "").strip()[:500]},
+            }
+
+        return resp
 
     # ---- Core API Methods ----
 
@@ -60,13 +98,42 @@ class GameClient:
         """Reset game progress (keeps player, resets starting node)."""
         if not self.player_id:
             return {"ok": False, "error": {"code": "NOT_REGISTERED", "message": "Not registered"}}
+        self._optimistic_owned_edges.clear()
         return self._post("/v1/restart", {"player_id": self.player_id})
 
-    def get_status(self) -> Dict[str, Any]:
-        """Get current player status including score, budget, owned nodes/edges."""
+    def get_status(self, include_optimistic: bool = False) -> Dict[str, Any]:
+        """
+        Get current player status including score, budget, owned nodes/edges.
+
+        Args:
+            include_optimistic: If True, inject locally-tracked successful edges that the server
+                hasn't reflected yet. This can make UIs feel more responsive, but can also cause
+                confusion when the server still rejects follow-up actions (e.g. EDGE_NOT_ADJACENT).
+                Default is False for robustness.
+        """
         if not self.player_id:
             return {}
-        return self._get(f"/v1/status/{self.player_id}")
+        data = self._get(f"/v1/status/{self.player_id}") or {}
+
+        # Reconcile optimistic edges against server truth.
+        server_edges = self._edges_from_status(data)
+        if self._optimistic_owned_edges:
+            # Drop any optimistic edges that the server now confirms.
+            self._optimistic_owned_edges = {e for e in self._optimistic_owned_edges if e not in server_edges}
+
+        # If server status is lagging, inject optimistic edges so downstream logic
+        # (claimable edges, reachable nodes, interactive viz) updates immediately.
+        if include_optimistic and self._optimistic_owned_edges:
+            owned_edges = list(data.get("owned_edges", []) or [])
+            existing = server_edges
+            for (a, b) in sorted(self._optimistic_owned_edges):
+                if (a, b) in existing:
+                    continue
+                owned_edges.append([a, b])
+                existing.add((a, b))
+            data["owned_edges"] = owned_edges
+
+        return data
 
     def get_graph(self) -> Dict[str, Any]:
         """Get the quantum network graph structure."""
@@ -98,6 +165,24 @@ class GameClient:
         if not self.player_id:
             return {"ok": False, "error": {"code": "NOT_REGISTERED", "message": "Not registered"}}
 
+        # IMPORTANT: The server expects the edge direction to be owned/reachable -> unowned/unreachable.
+        # Some helpers (or the graph's stored ordering) may provide the reverse direction, which can
+        # trigger EDGE_NOT_ADJACENT. Re-orient best-effort using your current status.
+        try:
+            # Use server-truth status for orientation so we don't attempt expansion too early.
+            status = self.get_status(include_optimistic=False) or {}
+            owned_nodes = set(status.get("owned_nodes", []) or [])
+            reachable = self.get_reachable_nodes(status)
+            a, b = edge
+            # Prefer orienting by owned_nodes (if server uses that notion), else fallback to reachability.
+            if a not in owned_nodes and b in owned_nodes:
+                edge = (b, a)
+            elif a not in reachable and b in reachable:
+                edge = (b, a)
+        except Exception:
+            # Never let re-orientation break claims
+            pass
+
         payload = {
             "player_id": self.player_id,
             "edge": [edge[0], edge[1]],
@@ -105,7 +190,17 @@ class GameClient:
             "circuit_qasm": qasm3.dumps(circuit),
             "flag_bit": int(flag_bit),
         }
-        return self._post("/v1/claim_edge", payload)
+        resp = self._post("/v1/claim_edge", payload)
+
+        # Optimistic edge ownership: if the claim succeeded, treat it as owned immediately
+        # even if /status hasn't reflected it yet (prevents "attack twice" UX).
+        try:
+            if resp.get("ok") and resp.get("data", {}).get("success"):
+                self._optimistic_owned_edges.add(self._normalize_edge(edge[0], edge[1]))
+        except Exception:
+            # Never let bookkeeping break the API call
+            pass
+        return resp
 
     # ---- Convenience Methods ----
 
@@ -115,10 +210,73 @@ class GameClient:
             self._cached_graph = self.get_graph()
         return self._cached_graph
 
-    def get_claimable_edges(self) -> List[Dict[str, Any]]:
-        """Get edges adjacent to owned nodes that can be claimed."""
-        status = self.get_status()
-        owned = set(status.get('owned_nodes', []))
+    @staticmethod
+    def _normalize_edge(a: str, b: str) -> Tuple[str, str]:
+        """Canonical undirected edge representation for set membership."""
+        return (a, b) if a <= b else (b, a)
+
+    def _edges_from_status(self, status: Dict[str, Any]) -> Set[Tuple[str, str]]:
+        edges: Set[Tuple[str, str]] = set()
+        for e in status.get("owned_edges", []) or []:
+            try:
+                a, b = e
+            except Exception:
+                continue
+            edges.add(self._normalize_edge(a, b))
+        return edges
+
+    def get_reachable_nodes(self, status: Optional[Dict[str, Any]] = None) -> Set[str]:
+        """
+        Nodes you can expand from based on connectivity, NOT vertex ownership.
+
+        In this game:
+        - `owned_edges` define your connectivity / where you can expand next.
+        - `owned_nodes` reflects vertex reward winners and should not gate movement.
+        """
+        status = status or self.get_status() or {}
+        start = status.get("starting_node")
+        if not start:
+            # Fallback: if server didn't provide starting_node, best-effort seed from owned_nodes
+            owned_nodes = status.get("owned_nodes", []) or []
+            start = owned_nodes[0] if owned_nodes else None
+        if not start:
+            return set()
+
+        # Build adjacency from owned edges (undirected)
+        adj: Dict[str, Set[str]] = {}
+        for e in status.get("owned_edges", []) or []:
+            try:
+                a, b = e
+            except Exception:
+                continue
+            adj.setdefault(a, set()).add(b)
+            adj.setdefault(b, set()).add(a)
+
+        # BFS/DFS from start
+        seen: Set[str] = set()
+        stack = [start]
+        while stack:
+            u = stack.pop()
+            if u in seen:
+                continue
+            seen.add(u)
+            for v in adj.get(u, set()):
+                if v not in seen:
+                    stack.append(v)
+        return seen
+
+    def get_claimable_edges(self, include_optimistic: bool = False) -> List[Dict[str, Any]]:
+        """
+        Get edges adjacent to your reachable component that can be claimed.
+
+        IMPORTANT:
+        - The server enforces adjacency using your current "owned nodes" set (as returned by /status).
+          In practice, you can only submit claims on edges with exactly one endpoint in `owned_nodes`.
+        - We intentionally do NOT filter out edges that are already in `owned_edges`, because players
+          may want to re-claim/reinforce the same edge to increase vertex claim strength.
+        """
+        status = self.get_status(include_optimistic=include_optimistic)
+        owned = set(status.get("owned_nodes", []) or [])
         if not owned:
             return []
 
