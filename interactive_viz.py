@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
 import networkx as nx
 
 import optimal
@@ -29,8 +30,10 @@ class InteractiveGraphTool:
     - +/-: radius
     """
 
-    def __init__(self, client):
+    def __init__(self, client, *, session_file: Optional["Path"] = None, starting_candidates: Optional[List[Dict]] = None):
         self.client = client
+        self.session_file = session_file
+        self.starting_candidates = starting_candidates or []
 
         # Static graph
         self.graph: nx.Graph = nx.Graph()
@@ -64,6 +67,8 @@ class InteractiveGraphTool:
         self.ax = None
         self._hud_top = None
         self._hud_bottom = None
+        self._btn_reset = None
+        self._btn_refresh = None
 
         self._load_graph_once()
         self._compute_layout_once()
@@ -363,6 +368,104 @@ class InteractiveGraphTool:
         self.selected_edge = None
         self.redraw(refit=False, keep_bottom=True)
 
+    def _save_session(self) -> None:
+        if not self.session_file:
+            return
+        try:
+            import json
+
+            payload = {
+                "api_token": getattr(self.client, "api_token", None),
+                "player_id": getattr(self.client, "player_id", None),
+                "name": getattr(self.client, "name", None),
+                "starting_candidates": self.starting_candidates,
+            }
+            self.session_file.write_text(json.dumps(payload))
+        except Exception:
+            # never crash UI on session saving
+            pass
+
+    def _prompt_select_starting_node(self) -> None:
+        """
+        Console prompt to select starting node.
+        Uses cached starting_candidates if present, otherwise asks for node_id directly.
+        """
+        status = self.client.get_status(include_optimistic=False) or {}
+        if status.get("starting_node"):
+            return
+
+        candidates = self.starting_candidates or []
+        if candidates:
+            print("\nStarting candidates:")
+            for i, c in enumerate(candidates):
+                print(f"  [{i}] {c.get('node_id')} | +{c.get('utility_qubits', 0)} pts | +{c.get('bonus_bell_pairs', 0)} budget")
+            raw = input("Pick starting node by index or exact node_id: ").strip()
+            node_id = None
+            if raw.isdigit():
+                idx = int(raw)
+                if 0 <= idx < len(candidates):
+                    node_id = candidates[idx].get("node_id")
+            if not node_id:
+                node_id = raw
+        else:
+            node_id = input("Enter starting node_id (from your candidate list): ").strip()
+
+        if not node_id:
+            print("No starting node selected.")
+            return
+
+        res = self.client.select_starting_node(node_id)
+        if not res.get("ok"):
+            print("Failed to select starting node:", res.get("error", {}).get("code"), res.get("error", {}).get("message"))
+            return
+
+        # update view
+        self.refresh()
+        self.center_node = (self.client.get_status(include_optimistic=False) or {}).get("starting_node") or node_id
+
+    def reset_account(self) -> None:
+        """
+        Reset game progress and re-select starting node.
+        """
+        confirm = input("Type YES to restart your account (resets score/budget and starting node): ").strip()
+        if confirm != "YES":
+            self._set_bottom("Reset cancelled.")
+            self.fig.canvas.draw_idle()
+            return
+
+        self._set_bottom("Resetting... (check console)")
+        self.fig.canvas.draw_idle()
+        plt.pause(0.05)
+
+        res = self.client.restart()
+        if not res.get("ok"):
+            self._set_bottom(f"Reset FAILED: {(res.get('error') or {}).get('code')} {(res.get('error') or {}).get('message')}")
+            self.fig.canvas.draw_idle()
+            return
+
+        # restart sometimes returns candidates; persist if present
+        try:
+            data = res.get("data", {}) or {}
+            cands = data.get("starting_candidates")
+            if isinstance(cands, list) and cands:
+                self.starting_candidates = cands
+                self._save_session()
+        except Exception:
+            pass
+
+        # prompt re-selection (console)
+        self._prompt_select_starting_node()
+        self._save_session()
+
+        self.refresh()
+        if self.status.get("starting_node"):
+            self.center_node = self.status.get("starting_node")
+        self.redraw(refit=True)
+
+    def refresh_and_redraw(self) -> None:
+        self.refresh()
+        self.redraw(refit=False)
+
     def redraw(self, refit: bool, keep_bottom: bool = False) -> None:
         xlim = ylim = None
         bottom = None
@@ -454,6 +557,15 @@ class InteractiveGraphTool:
         self._set_bottom(bottom)
         self._fit_view_to_nodes()
 
+        # Buttons (top-left)
+        ax_reset = self.fig.add_axes([0.01, 0.93, 0.10, 0.05])
+        self._btn_reset = Button(ax_reset, "Reset")
+        self._btn_reset.on_clicked(lambda _evt: self.reset_account())
+
+        ax_refresh = self.fig.add_axes([0.12, 0.93, 0.10, 0.05])
+        self._btn_refresh = Button(ax_refresh, "Refresh")
+        self._btn_refresh.on_clicked(lambda _evt: self.refresh_and_redraw())
+
         self.fig.canvas.mpl_connect("button_press_event", self.on_button_press)
         self.fig.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.fig.canvas.mpl_connect("button_release_event", self.on_button_release)
@@ -464,25 +576,74 @@ class InteractiveGraphTool:
 
 
 if __name__ == "__main__":
-    from client import GameClient
     import json
     from pathlib import Path
+    from client import GameClient
 
     SESSION_FILE = Path("session.json")
 
     def load_session():
         if not SESSION_FILE.exists():
-            return None
+            return None, []
         data = json.loads(SESSION_FILE.read_text())
         c = GameClient(api_token=data.get("api_token"))
         c.player_id = data.get("player_id")
         c.name = data.get("name")
-        return c
+        candidates = data.get("starting_candidates") or []
+        return c, candidates
 
-    client = load_session()
-    if not client:
-        print("Please run gameplay.py first to register/login!")
-    else:
-        print(f"Loaded session for {client.player_id}")
-        InteractiveGraphTool(client).show()
+    def save_session(client: GameClient, candidates: List[Dict]):
+        if not getattr(client, "api_token", None):
+            return
+        SESSION_FILE.write_text(
+            json.dumps(
+                {
+                    "api_token": client.api_token,
+                    "player_id": client.player_id,
+                    "name": client.name,
+                    "starting_candidates": candidates,
+                }
+            )
+        )
+
+    client, candidates = load_session()
+
+    # If no saved session, register interactively.
+    if not client or not getattr(client, "api_token", None):
+        print("No saved session. Register a new player.")
+        player_id = input("Player ID: ").strip()
+        name = input("Name: ").strip()
+        location = input("Location (remote or in_person): ").strip() or "remote"
+        client = GameClient()
+        reg = client.register(player_id, name, location=location)
+        if not reg.get("ok"):
+            raise RuntimeError(f"Register failed: {reg.get('error', {}).get('code')} {reg.get('error', {}).get('message')}")
+        candidates = (reg.get("data", {}) or {}).get("starting_candidates", []) or []
+        save_session(client, candidates)
+        print("Registered and saved session.")
+
+    # Ensure starting node selected
+    status = client.get_status(include_optimistic=False) or {}
+    if not status.get("starting_node"):
+        if candidates:
+            print("\nStarting candidates:")
+            for i, c in enumerate(candidates):
+                print(f"  [{i}] {c.get('node_id')} | +{c.get('utility_qubits', 0)} pts | +{c.get('bonus_bell_pairs', 0)} budget")
+            raw = input("Pick starting node by index or exact node_id: ").strip()
+            node_id = None
+            if raw.isdigit():
+                idx = int(raw)
+                if 0 <= idx < len(candidates):
+                    node_id = candidates[idx].get("node_id")
+            if not node_id:
+                node_id = raw
+        else:
+            node_id = input("Enter starting node_id (from your candidate list): ").strip()
+
+        sel = client.select_starting_node(node_id)
+        if not sel.get("ok"):
+            raise RuntimeError(f"Select starting node failed: {sel.get('error', {}).get('code')} {sel.get('error', {}).get('message')}")
+
+    print(f"Loaded session for {client.player_id}")
+    InteractiveGraphTool(client, session_file=SESSION_FILE, starting_candidates=candidates).show()
 
