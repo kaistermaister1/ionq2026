@@ -1,142 +1,56 @@
-# iQuHack 2026 - Quantum Entanglement Distillation Game
+## iQuHack 2026 — Entanglement Distillation Game (IonQ)
 
-A competitive quantum networking game where players build subgraphs by claiming edges through entanglement distillation.
+This repo contains our **hackathon toolkit** for the entanglement distillation game: a small Python SDK, a notebook “control center”, and visual + automated strategy helpers.
 
-## Quick Start
+### Our approach (what we built + why)
 
-### 1. Install Dependencies
+- **Circuit toolkit first**: we implemented and iterated on practical OpenQASM 3 / Qiskit distillation circuits (with explicit `flag_bit` post-selection) so we can reliably convert “\(N\) noisy pairs” → “one higher-fidelity pair” per edge type. See `distillation_circuits.py`.
+- **Optimize what the game rewards**: edge contribution is driven by **fidelity × success_probability**, so we target circuits/parameters that maximize \(F \cdot p\) while still meeting the edge’s threshold.
+- **Expansion strategy**: we prioritize reachable, high-value nodes (utility qubits + bonus bell pairs) while managing difficulty and failure streaks. See `greedy_auto_viz.py`.
+- **Fast feedback loops**: we built UIs to reduce iteration time—manual interactive play, and an auto-running greedy visualizer. See `interactive_viz.py` and `web_client.html`.
+
+### Quickstart
+
+#### Python (recommended: notebook workflow)
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+cd 2026-IonQ
+python -m venv .venv
+.\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Start Playing
+Open `demo.ipynb` (VS Code or Jupyter). It includes **session save/load** via `session.json` so you don’t have to re-register every time.
 
-Open `demo.ipynb` in Jupyter or VS Code:
+#### Browser UI (quick manual play + map)
 
 ```bash
-jupyter notebook demo.ipynb
+cd 2026-IonQ
+python proxy_server.py
 ```
 
-The notebook walks you through registration, gameplay, and circuit design.
+Then open `http://localhost:5173/web_client.html`.
 
----
+### Repository structure (what to open first)
 
-## Game Overview
-
-**Objective**: Build a quantum network subgraph to maximize your score.
-
-**How It Works**:
-1. Register with a unique player ID
-2. Select a starting node from candidates
-3. Design distillation circuits to improve noisy Bell pair fidelity
-4. Claim edges by beating fidelity thresholds
-5. Earn points from nodes with utility qubits
-6. Manage your limited bell pair budget
-
-**Key Mechanics**:
-- **Graph**: Quantum network with nodes (utility qubits) and edges (entanglement links)
-- **Distillation**: Submit circuits to purify noisy Bell pairs
-- **Thresholds**: Achieve fidelity >= threshold to claim an edge
-- **Budget**: Limited bell pairs for distillation attempts
-- **Scoring**: Sum of utility qubits from owned nodes
-
----
-
-## Repository Structure
-
-```
-iQuHack2026/
-├── demo.ipynb         # Interactive tutorial - START HERE
-├── client.py          # GameClient class (API wrapper)
-├── visualization.py   # GraphTool class (graph rendering)
-├── game_handbook.md   # Detailed game rules
-├── requirements.txt   # Python dependencies
-└── README.md          # This file
+```text
+2026-IonQ/
+  demo.ipynb              Notebook “home base” (register, play, iterate)
+  client.py               GameClient (API wrapper + claim helpers)
+  distillation_circuits.py Circuit library / templates
+  visualization.py        Static graph utilities (NetworkX/Matplotlib)
+  interactive_viz.py       Interactive map + “click edge, attack” workflow
+  greedy_auto_viz.py       Auto-running greedy strategy visualizer
+  web_client.html          Standalone web client UI (uses a proxy for CORS)
+  proxy_server.py          Local static server + CORS proxy for web_client.html
+  api/proxy.js             Vercel-style serverless proxy (optional deployment)
+  game_handbook.md         Game rules (LOCC constraints, scoring, etc.)
+  requirements.txt         Python dependencies
+  session.json             Local saved token/session (do not commit)
 ```
 
----
+### Configuration notes
 
-## SDK Usage
-
-### GameClient
-
-```python
-from client import GameClient
-
-client = GameClient()
-result = client.register("player_id", "Name", location="remote")
-
-# Select starting node
-client.select_starting_node(node_id)
-
-# Get claimable edges
-claimable = client.get_claimable_edges()
-
-# Claim an edge with a circuit
-result = client.claim_edge(edge, circuit, flag_bit, num_bell_pairs)
-
-# Check status
-client.print_status()
-```
-
-### GraphTool
-
-```python
-from visualization import GraphTool
-
-viz = GraphTool(client.get_cached_graph())
-owned = set(status.get('owned_nodes', []))
-
-# Render focused view (nodes within 2 hops)
-viz.render(owned, radius=2)
-
-# Text summary
-viz.print_summary(owned)
-```
-
----
-
-## API Endpoints
-
-Base URL: `https://demo-entanglement-distillation-qfhvrahfcq-uc.a.run.app`
-
-**Public**:
-- `GET /v1/graph` - Get graph structure
-- `GET /v1/leaderboard` - Get player rankings
-
-**Protected** (Bearer token required):
-- `POST /v1/register` - Register player (returns api_token)
-- `POST /v1/select_starting_node` - Choose starting node
-- `POST /v1/claim_edge` - Submit distillation circuit
-- `GET /v1/status/{player_id}` - Get player status
-- `POST /v1/restart` - Reset progress
-
----
-
-## Strategy Tips
-
-1. **Starting Node**: Balance utility qubits vs. bonus bell pairs
-2. **Edge Claiming**: Start with low-difficulty edges
-3. **Circuit Design**: More bell pairs improve fidelity but cost more budget
-4. **Budget**: Failed attempts are free - only successful claims cost bell pairs
-
----
-
-## Troubleshooting
-
-**"Module not found"**: Run `pip install -r requirements.txt`
-
-**"Invalid token"**: Re-register or use saved session token
-
-**Visualization not showing**: Install matplotlib: `pip install matplotlib`
-
----
-
-## Support
-
-See `demo.ipynb` for comprehensive examples. For issues, check the game handbook or ask the organizers.
-
-Good luck!
+- **Upstream server**: defaults to `https://demo-entanglement-distillation-qfhvrahfcq-uc.a.run.app`.
+  - Python: pass `base_url=...` to `GameClient(...)`.
+  - Web/proxy: set `UPSTREAM_BASE_URL` if you need to point elsewhere.

@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import networkx as nx
 
-import optimal
+import distillation_circuits
 
 
 class InteractiveGraphTool:
@@ -69,6 +69,11 @@ class InteractiveGraphTool:
         self._hud_bottom = None
         self._btn_reset = None
         self._btn_refresh = None
+        self._btn_new_client = None
+        # UI state (avoid console input inside callbacks)
+        self._reset_armed = False
+        self._reset_armed_until = 0.0
+        self._pending_start_selection = False
 
         self._load_graph_once()
         self._compute_layout_once()
@@ -300,7 +305,16 @@ class InteractiveGraphTool:
         self.redraw(refit=False, keep_bottom=True)
 
     def on_key(self, event):
+        if self._maybe_handle_starting_node_key(getattr(event, "key", "")):
+            return
+
         if event.key == "escape":
+            # If we're pending starting-node selection, Esc cancels the pending prompt.
+            if self._pending_start_selection:
+                self._pending_start_selection = False
+                self._set_bottom("Starting node selection cancelled.")
+                self.fig.canvas.draw_idle()
+                return
             self.selected_edge = None
             self.redraw(refit=False)
             return
@@ -339,15 +353,15 @@ class InteractiveGraphTool:
 
         try:
             if diff == 1:
-                res = optimal.run_d1_n2_on_edge(self.client, u, v)
+                res = distillation_circuits.run_d1_n2_on_edge(self.client, u, v)
             elif diff == 2:
-                res = optimal.run_d2_on_edge(self.client, u, v)
+                res = distillation_circuits.run_d2_on_edge(self.client, u, v)
             elif diff == 3:
-                res = optimal.run_d3_n3_on_edge(self.client, u, v)
+                res = distillation_circuits.run_d3_n3_on_edge(self.client, u, v)
             elif diff == 4:
-                res = optimal.conquer_edge_with_d4_n3(self.client, u, v)
+                res = distillation_circuits.conquer_edge_with_d4_n3(self.client, u, v)
             elif diff == 5:
-                res = optimal.conquer_edge_with_d5_n5(self.client, u, v)
+                res = distillation_circuits.conquer_edge_with_d5_n5(self.client, u, v)
             else:
                 self._set_bottom(f"No strategy for difficulty {diff}")
                 return
@@ -384,6 +398,65 @@ class InteractiveGraphTool:
         except Exception:
             # never crash UI on session saving
             pass
+
+    def new_client(self) -> None:
+        """
+        Create & switch to a new client (sign out current user).
+
+        Uses Tk dialogs (safe inside matplotlib callback) instead of input().
+        After registering, you select a starting node via keys 0-3 (same as reset).
+        """
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, simpledialog
+        except Exception as e:
+            self._set_bottom(f"Tk dialogs unavailable: {e}")
+            self.fig.canvas.draw_idle()
+            return
+
+        # Create a hidden Tk root for dialogs
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            player_id = simpledialog.askstring("New Client", "Player ID (must be unique):", parent=root)
+            if not player_id:
+                return
+            name = simpledialog.askstring("New Client", "Name:", parent=root)
+            if not name:
+                return
+            location = simpledialog.askstring("New Client", "Location (remote or in_person):", parent=root)
+            location = (location or "remote").strip() or "remote"
+
+            from client import GameClient
+
+            c = GameClient()
+            reg = c.register(player_id.strip(), name.strip(), location=location)
+            if not reg.get("ok"):
+                messagebox.showerror(
+                    "Register failed",
+                    f"{(reg.get('error') or {}).get('code')} {(reg.get('error') or {}).get('message')}",
+                    parent=root,
+                )
+                return
+
+            self.client = c
+            self.starting_candidates = (reg.get("data", {}) or {}).get("starting_candidates", []) or []
+
+            # Force starting node selection through keypresses
+            self._pending_start_selection = True
+            self.selected_edge = None
+            self.center_node = None
+
+            self._save_session()
+            self.refresh()
+            self.redraw(refit=True)
+            self._set_bottom(self._starting_node_prompt_text())
+            self.fig.canvas.draw_idle()
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
 
     def _prompt_select_starting_node(self) -> None:
         """
@@ -427,13 +500,20 @@ class InteractiveGraphTool:
         """
         Reset game progress and re-select starting node.
         """
-        confirm = input("Type YES to restart your account (resets score/budget and starting node): ").strip()
-        if confirm != "YES":
-            self._set_bottom("Reset cancelled.")
+        # IMPORTANT: do not call input() inside matplotlib callbacks.
+        now = time.time()
+        if (not self._reset_armed) or (now > self._reset_armed_until):
+            self._reset_armed = True
+            self._reset_armed_until = now + 8.0
+            self._set_bottom("Reset armed. Click Reset again within 8s to confirm.")
             self.fig.canvas.draw_idle()
             return
 
-        self._set_bottom("Resetting... (check console)")
+        # confirmed
+        self._reset_armed = False
+        self._reset_armed_until = 0.0
+
+        self._set_bottom("Resetting... then choose a starting node (press 0-3).")
         self.fig.canvas.draw_idle()
         plt.pause(0.05)
 
@@ -453,18 +533,58 @@ class InteractiveGraphTool:
         except Exception:
             pass
 
-        # prompt re-selection (console)
-        self._prompt_select_starting_node()
-        self._save_session()
-
+        # Re-select starting node via keypress (0-3), not console input.
+        self._pending_start_selection = True
+        self.selected_edge = None
         self.refresh()
-        if self.status.get("starting_node"):
-            self.center_node = self.status.get("starting_node")
+        self.center_node = None
+        self._save_session()
         self.redraw(refit=True)
+        self._set_bottom(self._starting_node_prompt_text())
+        self.fig.canvas.draw_idle()
+        return
 
     def refresh_and_redraw(self) -> None:
         self.refresh()
         self.redraw(refit=False)
+
+    def _starting_node_prompt_text(self) -> str:
+        cands = self.starting_candidates or []
+        if not cands:
+            return "No cached starting candidates. Restarted; please restart the script to select a starting node."
+        items = []
+        for i, c in enumerate(cands[:4]):
+            items.append(f"[{i}] {c.get('node_id')}")
+        return "Select starting node (press 0-3): " + " | ".join(items)
+
+    def _maybe_handle_starting_node_key(self, key: str) -> bool:
+        if not self._pending_start_selection:
+            return False
+        if not key or not str(key).isdigit():
+            return False
+        idx = int(key)
+        if idx < 0 or idx >= len(self.starting_candidates):
+            self._set_bottom(self._starting_node_prompt_text())
+            self.fig.canvas.draw_idle()
+            return True
+        node_id = (self.starting_candidates[idx] or {}).get("node_id")
+        if not node_id:
+            self._set_bottom(self._starting_node_prompt_text())
+            self.fig.canvas.draw_idle()
+            return True
+        res = self.client.select_starting_node(node_id)
+        if not res.get("ok"):
+            self._set_bottom(f"Select failed: {(res.get('error') or {}).get('code')} {(res.get('error') or {}).get('message')}")
+            self.fig.canvas.draw_idle()
+            return True
+
+        self._pending_start_selection = False
+        self.refresh()
+        self.center_node = (self.status or {}).get("starting_node") or node_id
+        self._set_bottom(f"Starting node set to {self.center_node}.")
+        self._save_session()
+        self.redraw(refit=True, keep_bottom=True)
+        return True
 
     def redraw(self, refit: bool, keep_bottom: bool = False) -> None:
         xlim = ylim = None
@@ -563,8 +683,12 @@ class InteractiveGraphTool:
         self._btn_reset.on_clicked(lambda _evt: self.reset_account())
 
         ax_refresh = self.fig.add_axes([0.12, 0.93, 0.10, 0.05])
-        self._btn_refresh = Button(ax_refresh, "Refresh")
+        self._btn_refresh = Button(ax_refresh, "Sync")
         self._btn_refresh.on_clicked(lambda _evt: self.refresh_and_redraw())
+
+        ax_new = self.fig.add_axes([0.23, 0.93, 0.14, 0.05])
+        self._btn_new_client = Button(ax_new, "New Client")
+        self._btn_new_client.on_clicked(lambda _evt: self.new_client())
 
         self.fig.canvas.mpl_connect("button_press_event", self.on_button_press)
         self.fig.canvas.mpl_connect("motion_notify_event", self.on_motion)
