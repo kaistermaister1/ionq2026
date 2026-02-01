@@ -9,33 +9,12 @@ Our hackathon project: a **circuit toolkit + strategy layer + visual clients** f
 
 ### Table of contents
 
-- [Screenshots](#screenshots)
 - [Quickstart](#quickstart)
 - [Website](#website)
 - [Game (web)](#game-web)
 - [How we play](#how-we-play)
 - [Project structure](#project-structure)
 - [Configuration](#configuration)
-
-### Screenshots
-
-Put images in **`assets/screenshots/`** (relative to this `README.md`) and reference them with relative paths so GitHub renders them.
-
-Example (replace filenames with your real ones):
-
-```md
-![Web client overview](assets/screenshots/web-client.png)
-![Interactive viz edge attack](assets/screenshots/interactive-viz.png)
-![Greedy auto viz run](assets/screenshots/greedy-auto-viz.png)
-```
-
-Recommended filenames:
-
-- `assets/screenshots/web-client.png`
-- `assets/screenshots/interactive-viz.png`
-- `assets/screenshots/greedy-auto-viz.png`
-- `assets/screenshots/notebook-demo.png`
-- `assets/screenshots/website.png`
 
 ### Quickstart
 
@@ -68,6 +47,8 @@ The hackathon website lives in `ionqwebsite/`:
 - **Entry point**: `ionqwebsite/index.html` (redirects to `iQuhackweb.html`)
 - **Main page**: `ionqwebsite/iQuhackweb.html`
 
+![Website](assets/screenshots/website.png)
+
 To view locally (recommended: use the same dev server as the game so relative assets work):
 
 ```bash
@@ -81,6 +62,8 @@ Then open `http://localhost:5173/iQuhackweb.html` (or just `http://localhost:517
 
 The playable web client lives in `ionqwebsite/web_client.html`.
 
+![Web game](assets/screenshots/game.png)
+
 Start the local proxy server (CORS + static):
 
 ```bash
@@ -91,6 +74,8 @@ python proxy_server.py
 Then open `http://localhost:5173/web_client.html`.
 
 #### Python visualizers
+
+![Python visualizers](assets/screenshots/python-visualizers.png)
 
 ```bash
 cd 2026-IonQ
